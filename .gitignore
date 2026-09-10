@@ -1,0 +1,91 @@
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+jspm_packages/
+web_modules/
+
+# ─── Build output ─────────────────────────────────────────────────────────────
+dist/
+build/Release
+
+# ─── Wrangler / Cloudflare Workers ────────────────────────────────────────────
+.wrangler/
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# ─── Runtime / OS ─────────────────────────────────────────────────────────────
+pids/
+*.pid
+*.seed
+*.pid.lock
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Test / diagnostic scripts (dev-only, not for deployment) ─────────────────
+test-*.js
+test-*.ts
+
+# ─── AI agent / planning artifacts (internal tooling only) ────────────────────
+project.md
+implementation_plan.md
+walkthrough.md
+
+# ─── Caches & temp files ──────────────────────────────────────────────────────
+.cache/
+.parcel-cache/
+.temp/
+.nyc_output/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# ─── Coverage ─────────────────────────────────────────────────────────────────
+coverage/
+*.lcov
+
+# ─── Yarn v2 ──────────────────────────────────────────────────────────────────
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+.yarn-integrity
+
+# ─── npm pack output ──────────────────────────────────────────────────────────
+*.tgz
+
+# ─── Misc build tools ─────────────────────────────────────────────────────────
+.grunt/
+.fusebox/
+.serverless/
+.dynamodb/
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+lib-cov/
+bower_components/
+.lock-wscript
+.node_repl_history
+.npm
+.tern-port
+.vscode-test
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# ─── Framework build dirs ─────────────────────────────────────────────────────
+.next/
+.nuxt/
+.vuepress/dist/
+.docusaurus/
+out/

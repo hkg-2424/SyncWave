@@ -1,0 +1,60 @@
+/**
+ * Wrangler configuration for SyncWave
+ *
+ * Worker = backend entry point that handles HTTP and WebSocket upgrade requests.
+ * Durable Object (RoomDO) = stateful room coordinator — one instance per room.
+ * Room ID → deterministic Durable Object identity via idFromName().
+ * WebSocket = real-time control/signaling channel between clients and the room DO.
+ * WebRTC = peer-to-peer audio-file transfer (handled entirely in browsers).
+ *
+ * Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "syncwave",
+	"main": "src/worker.js",
+	"compatibility_date": "2026-09-07",
+
+	/**
+	 * Static assets configuration.
+	 * The Vite build outputs the React SPA into ./dist/client.
+	 * "not_found_handling": "single-page-application" ensures that client-side
+	 * routes like /room/ABC123 are served by index.html instead of returning 404.
+	 */
+	"assets": {
+		"directory": "./dist/client",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application"
+	},
+
+	/**
+	 * Durable Object bindings.
+	 * ROOMS is the binding name accessible in the Worker via env.ROOMS.
+	 * RoomDO is the class name exported from src/worker.js.
+	 */
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "RoomDO",
+				"name": "ROOMS"
+			}
+		]
+	},
+
+	/**
+	 * Durable Object migrations.
+	 * Using SQLite-backed storage (new_sqlite_classes) — this is the modern
+	 * approach and is compatible with the Cloudflare Workers Free plan.
+	 * Do NOT use legacy KV-backed Durable Objects.
+	 */
+	"migrations": [
+		{
+			"new_sqlite_classes": ["RoomDO"],
+			"tag": "v1"
+		}
+	],
+
+	"observability": {
+		"enabled": true
+	}
+}
