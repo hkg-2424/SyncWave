@@ -35,6 +35,7 @@ desktop.ini
 # ─── Test / diagnostic scripts (dev-only, not for deployment) ─────────────────
 test-*.js
 test-*.ts
+test/
 
 # ─── AI agent / planning artifacts (internal tooling only) ────────────────────
 project.md
