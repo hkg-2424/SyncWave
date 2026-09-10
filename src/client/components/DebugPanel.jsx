@@ -17,6 +17,10 @@ export default function DebugPanel({
 }) {
   const [open, setOpen] = useState(false);
 
+  // Gate developer diagnostics behind ?debug=1 query parameter
+  const isDebug = new URLSearchParams(window.location.search).has("debug");
+  if (!isDebug) return null;
+
   return (
     <div className="debug-panel card animate-slide-up" style={{ animationDelay: "0.25s" }}>
       <button

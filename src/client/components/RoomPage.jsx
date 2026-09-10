@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { MESSAGE_TYPES } from "../../protocol/messageTypes.js";
 import { useWebRTC } from "../../hooks/useWebRTC.js";
 import { useClockSync } from "../../hooks/useClockSync.js";
@@ -17,6 +17,7 @@ import DebugPanel from "./DebugPanel.jsx";
  */
 export default function RoomPage() {
   const { roomId } = useParams();
+  const navigate = useNavigate();
 
   // ── 1. User identity ──────────────────────────────────────────
   const [userId] = useState(() => {
@@ -45,10 +46,19 @@ export default function RoomPage() {
   const [readyUsers, setReadyUsers] = useState([]);
   const [error, setError] = useState(null);
 
+  // Waiting room & Host admission control state
+  const [isWaitingRoom, setIsWaitingRoom] = useState(false);
+  const [joinDenied, setJoinDenied] = useState(false);
+  const [pendingRequests, setPendingRequests] = useState([]);
+
+  // Host-Left Destruction Countdown
+  const [hostLeftCountdown, setHostLeftCountdown] = useState(null);
+  const isDestroyingRef = useRef(false);
+  const countdownTimerRef = useRef(null);
+
   // Audio source & file transfer state
   const [audioUrl, setAudioUrl] = useState(null);
   const [transferState, setTransferState] = useState(null); // { progress, bytesTransferred, totalBytes, fileName, status }
-  // Received blob for guest download
   const [receivedBlob, setReceivedBlob] = useState(null);
 
   const wsRef = useRef(null);
@@ -71,15 +81,46 @@ export default function RoomPage() {
     }
   }, []);
 
-  // ── 4. Clock Synchronization Hook ─────────────────────────────
-  // BUG FIX: useClockSync now returns clockSyncRef (the stable ref object)
-  // instead of clockSyncRef.current (which was null on first render).
+  // ── 4. Host Control Actions ───────────────────────────────────
+  const handleApproveJoin = useCallback(
+    (targetUserId) => {
+      sendMessage({
+        type: MESSAGE_TYPES.APPROVE_JOIN,
+        targetUserId,
+      });
+      setPendingRequests((prev) => prev.filter((r) => r.userId !== targetUserId));
+    },
+    [sendMessage]
+  );
+
+  const handleDenyJoin = useCallback(
+    (targetUserId) => {
+      sendMessage({
+        type: MESSAGE_TYPES.DENY_JOIN,
+        targetUserId,
+      });
+      setPendingRequests((prev) => prev.filter((r) => r.userId !== targetUserId));
+    },
+    [sendMessage]
+  );
+
+  const handleTransferHost = useCallback(
+    (targetUserId, targetName) => {
+      if (window.confirm(`Transfer room ownership to ${targetName}?`)) {
+        sendMessage({
+          type: MESSAGE_TYPES.TRANSFER_HOST,
+          targetUserId,
+        });
+      }
+    },
+    [sendMessage]
+  );
+
+  // ── 5. Clock Synchronization Hook ─────────────────────────────
   const { offset, rtt, sampleCount, clockSyncRef, handleClockSyncResponse } =
     useClockSync({ sendMessage });
 
-  // ── 5. Playback Synchronization Hook ──────────────────────────
-  // BUG FIX: Now passes clockSyncRef (ref object) instead of clockSync (null on first render).
-  // audioRef is created inside the hook and passed to PlaybackSyncManager as a ref object.
+  // ── 6. Playback Synchronization Hook ──────────────────────────
   const {
     audioRef,
     status: playbackStatus,
@@ -93,7 +134,7 @@ export default function RoomPage() {
     handlePlaybackMessage,
   } = usePlaybackSync({ clockSyncRef, sendMessage });
 
-  // ── 6. File Receiver ──────────────────────────────────────────
+  // ── 7. File Receiver ──────────────────────────────────────────
   const fileReceiverRef = useRef(null);
   if (!fileReceiverRef.current) {
     fileReceiverRef.current = new FileReceiver({
@@ -109,13 +150,12 @@ export default function RoomPage() {
       onVerified: ({ blob, audioUrl: verifiedUrl, trackInfo }) => {
         setAudioUrl(verifiedUrl);
         setTrack(trackInfo);
-        setReceivedBlob(blob); // Store blob so guest can download
+        setReceivedBlob(blob);
         setTransferState((prev) => ({
           ...prev,
           progress: 100,
           status: "ready",
         }));
-        // Notify server that local peer is ready
         sendMessage({
           type: MESSAGE_TYPES.TRACK_READY,
         });
@@ -131,10 +171,7 @@ export default function RoomPage() {
     });
   }
 
-  // ── 7. WebRTC Hook ─────────────────────────────────────────────
-  // BUG FIX: useWebRTC now returns webrtcRef (stable ref object) instead of
-  // webrtcRef.current. The file transfer handler uses webrtcRef.current to
-  // always access the live WebRTCManager.
+  // ── 8. WebRTC Hook ─────────────────────────────────────────────
   const {
     peerStates,
     overallPeerStatus,
@@ -150,7 +187,7 @@ export default function RoomPage() {
     },
   });
 
-  // When a guest's DataChannel opens and the host has a file loaded, transfer it
+  // Host DataChannel file transfer to open peers
   useEffect(() => {
     if (!isHost || !uploadedFileRef.current || !track || !webrtcRef.current) return;
 
@@ -176,15 +213,13 @@ export default function RoomPage() {
     }
   }, [isHost, track, peerStates, readyUsers, webrtcRef]);
 
-  // ── 8. WebSocket Connection Lifecycle ─────────────────────────
+  // ── 9. WebSocket Connection Lifecycle ─────────────────────────
   const connectWebSocket = useCallback(() => {
-    // Clear any pending reconnect timer
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
 
-    // Close any previous socket cleanly
     if (wsRef.current) {
       const oldWs = wsRef.current;
       wsRef.current = null;
@@ -215,7 +250,6 @@ export default function RoomPage() {
       setConnectionStatus("connected");
       reconnectAttemptsRef.current = 0;
 
-      // Join room
       ws.send(
         JSON.stringify({
           type: MESSAGE_TYPES.JOIN_ROOM,
@@ -237,19 +271,23 @@ export default function RoomPage() {
     };
 
     ws.onclose = (event) => {
-      // Ignore close events from superseded sockets
       if (wsRef.current !== ws) return;
 
       console.log(`[WS] Closed: code=${event.code}, reason="${event.reason}", wasClean=${event.wasClean}`);
       setConnectionStatus("disconnected");
       wsRef.current = null;
 
-      // Do not auto-reconnect if clean departure
-      if (event.code === 1000 && event.reason === "Leaving room") {
+      if (
+        (event.code === 1000 && event.reason === "Leaving room") ||
+        isDestroyingRef.current ||
+        event.code === 4000
+      ) {
+        if (isDestroyingRef.current || event.code === 4000) {
+          setTimeout(() => navigate("/"), 2000);
+        }
         return;
       }
 
-      // Auto-reconnect with exponential backoff (Milestone 12)
       const attempt = reconnectAttemptsRef.current++;
       const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
       console.log(`[WS] Reconnecting in ${delay}ms (attempt ${attempt + 1})`);
@@ -260,13 +298,53 @@ export default function RoomPage() {
       if (wsRef.current !== ws) return;
       console.error("[WS] Error:", err);
     };
-  }, [roomId, userId, displayName]);
+  }, [roomId, userId, displayName, navigate]);
 
-  // ── 9. Main WebSocket Message Handler ─────────────────────────
+  // ── 10. Main WebSocket Message Handler ─────────────────────────
   const handleMessage = useCallback(
     (data) => {
       switch (data.type) {
+        case MESSAGE_TYPES.WAITING_FOR_APPROVAL:
+          setIsWaitingRoom(true);
+          setJoinDenied(false);
+          break;
+
+        case MESSAGE_TYPES.JOIN_DENIED:
+          setIsWaitingRoom(false);
+          setJoinDenied(true);
+          setError(data.message || "Host denied your entry request.");
+          break;
+
+        case MESSAGE_TYPES.JOIN_REQUEST:
+          setPendingRequests((prev) => {
+            if (prev.some((r) => r.userId === data.user.userId)) return prev;
+            return [...prev, data.user];
+          });
+          break;
+
+        case MESSAGE_TYPES.JOIN_REQUEST_CANCELLED:
+          setPendingRequests((prev) => prev.filter((r) => r.userId !== data.userId));
+          break;
+
+        case MESSAGE_TYPES.HOST_LEFT:
+          isDestroyingRef.current = true;
+          setHostLeftCountdown(10);
+          if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = setInterval(() => {
+            setHostLeftCountdown((prev) => {
+              if (prev <= 1) {
+                clearInterval(countdownTimerRef.current);
+                navigate("/");
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+          break;
+
         case MESSAGE_TYPES.ROOM_STATE:
+          setIsWaitingRoom(false);
+          setJoinDenied(false);
           setUsers(data.users || []);
           setHostId(data.hostId);
           if (data.track) setTrack(data.track);
@@ -293,7 +371,6 @@ export default function RoomPage() {
         case MESSAGE_TYPES.TRACK_METADATA:
           setTrack(data.track);
           if (data.readyUsers) setReadyUsers(data.readyUsers);
-          // If not host and new track uploaded, reset local readiness
           if (!isHost) {
             setAudioUrl(null);
             setReceivedBlob(null);
@@ -330,7 +407,7 @@ export default function RoomPage() {
           break;
       }
     },
-    [isHost, handlePlaybackMessage, handleSignalingMessage, handleClockSyncResponse]
+    [isHost, handlePlaybackMessage, handleSignalingMessage, handleClockSyncResponse, navigate]
   );
   handleMessageRef.current = handleMessage;
 
@@ -338,6 +415,7 @@ export default function RoomPage() {
     connectWebSocket();
     return () => {
       clearTimeout(reconnectTimerRef.current);
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
       if (wsRef.current) {
         wsRef.current.close(1000, "Leaving room");
         wsRef.current = null;
@@ -345,10 +423,7 @@ export default function RoomPage() {
     };
   }, [connectWebSocket]);
 
-  // ── 10. Host File Upload Handler ──────────────────────────────
-  // BUG FIX: Uses webrtcRef.current instead of stale webrtcManager value.
-  // Previously webrtcManager was captured from hook return as null on first
-  // render, so no peers were ever found to send the file to.
+  // ── 11. Host File Upload Handler ──────────────────────────────
   const handleHostFileReady = useCallback(
     async ({ file, track: trackMeta, localAudioUrl }) => {
       uploadedFileRef.current = file;
@@ -362,14 +437,11 @@ export default function RoomPage() {
         status: "ready",
       });
 
-      // 1. Broadcast TRACK_METADATA to room
       sendMessage({
         type: MESSAGE_TYPES.TRACK_METADATA,
         track: trackMeta,
       });
 
-      // 2. Transfer file to all open DataChannels
-      // BUG FIX: Access webrtcRef.current (live manager) not a stale closure value
       const manager = webrtcRef.current;
       if (manager) {
         for (const [peerId, peer] of manager.peers) {
@@ -397,7 +469,7 @@ export default function RoomPage() {
     [sendMessage, webrtcRef]
   );
 
-  // ── 11. Copy Invite Link ──────────────────────────────────────
+  // ── 12. Copy Invite Link & Rename ─────────────────────────────
   const [copied, setCopied] = useState(false);
   function handleCopyLink() {
     const link = `${window.location.origin}/room/${roomId}`;
@@ -407,7 +479,6 @@ export default function RoomPage() {
     });
   }
 
-  // ── 12. Display Name Change ───────────────────────────────────
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState(displayName);
 
@@ -416,7 +487,6 @@ export default function RoomPage() {
     if (trimmed && trimmed !== displayName) {
       setDisplayName(trimmed);
       sessionStorage.setItem("syncwave-displayName", trimmed);
-      // Re-join with new display name
       sendMessage({
         type: MESSAGE_TYPES.JOIN_ROOM,
         roomId,
@@ -427,9 +497,84 @@ export default function RoomPage() {
     setEditingName(false);
   }
 
+  // ── 13. Conditional Views (Join Denied / Waiting Room) ────────
+  if (joinDenied) {
+    return (
+      <div className="room-page">
+        <div className="container">
+          <div className="card animate-fade-in text-center" style={{ padding: "48px 24px" }}>
+            <div style={{ fontSize: "3rem", marginBottom: "16px" }}>⛔</div>
+            <h2 style={{ color: "var(--color-error)", marginBottom: "12px" }}>Entry Request Denied</h2>
+            <p style={{ color: "var(--color-text-dim)", marginBottom: "24px", lineHeight: "1.5" }}>
+              The host of room <strong className="mono">{roomId}</strong> denied your entry request.
+            </p>
+            <Link to="/" className="btn btn-primary">
+              Return to Home
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isWaitingRoom) {
+    return (
+      <div className="room-page">
+        <div className="container">
+          <div className="card animate-fade-in text-center" style={{ padding: "48px 24px" }}>
+            <div className="spinner" style={{ margin: "0 auto 20px" }} />
+            <h2 style={{ color: "var(--color-text)", marginBottom: "10px" }}>Waiting for Host Approval…</h2>
+            <p style={{ color: "var(--color-text-dim)", marginBottom: "24px", lineHeight: "1.5" }}>
+              Your request to join room <strong className="mono">{roomId}</strong> has been sent to the host.
+            </p>
+            <Link to="/" className="btn btn-secondary">
+              Cancel & Return Home
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="room-page">
       <div className="container">
+        {/* Host-Left Self-Destruction Warning Banner */}
+        {hostLeftCountdown !== null && (
+          <div className="host-left-banner animate-fade-in">
+            ⚠ The host left without transferring ownership! This room will self-destruct in{" "}
+            <strong>{hostLeftCountdown}s</strong>…
+          </div>
+        )}
+
+        {/* Host Pending Admission Requests Prompt */}
+        {isHost && pendingRequests.length > 0 && (
+          <div className="pending-requests-card card animate-slide-down">
+            <div className="section-label">📢 Join Requests ({pendingRequests.length})</div>
+            {pendingRequests.map((req) => (
+              <div key={req.userId} className="pending-request-item">
+                <span className="pending-name">
+                  👤 <strong>{req.displayName}</strong> wants to join the room.
+                </span>
+                <div className="pending-actions">
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() => handleApproveJoin(req.userId)}
+                  >
+                    ✓ Allow
+                  </button>
+                  <button
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => handleDenyJoin(req.userId)}
+                  >
+                    ✕ Deny
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Header */}
         <header className="room-header animate-fade-in">
           <Link to="/" className="room-logo">
@@ -543,6 +688,7 @@ export default function RoomPage() {
           hostId={hostId}
           readyUsers={readyUsers}
           connectionStatus={connectionStatus}
+          onTransferHost={handleTransferHost}
         />
 
         {/* System & Connection Status */}
@@ -555,7 +701,7 @@ export default function RoomPage() {
           offset={offset}
         />
 
-        {/* Developer Diagnostics Panel */}
+        {/* Developer Diagnostics Panel — gated behind ?debug=1 */}
         <DebugPanel
           userId={userId}
           hostId={hostId}
@@ -580,6 +726,51 @@ export default function RoomPage() {
         .room-page {
           flex: 1;
           padding: 24px 0 40px;
+        }
+
+        .text-center {
+          text-align: center;
+        }
+
+        .host-left-banner {
+          background: rgba(239, 68, 68, 0.2);
+          border: 1px solid rgba(239, 68, 68, 0.5);
+          color: #f87171;
+          padding: 12px 16px;
+          border-radius: var(--radius-md);
+          margin-bottom: 20px;
+          font-weight: 500;
+          font-size: 0.95rem;
+          text-align: center;
+          animation: pulse 1.5s infinite;
+        }
+
+        .pending-requests-card {
+          margin-bottom: 20px;
+          background: rgba(59, 130, 246, 0.12);
+          border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .pending-request-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 8px 0;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .pending-request-item:last-child {
+          border-bottom: none;
+        }
+
+        .pending-name {
+          font-size: 0.9rem;
+          color: var(--color-text);
+        }
+
+        .pending-actions {
+          display: flex;
+          gap: 8px;
         }
 
         .room-header {

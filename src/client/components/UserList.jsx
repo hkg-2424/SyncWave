@@ -1,7 +1,9 @@
 /**
  * UserList component displaying members, host badges, and track readiness.
  */
-export default function UserList({ users, localUserId, hostId, readyUsers, connectionStatus }) {
+export default function UserList({ users, localUserId, hostId, readyUsers, connectionStatus, onTransferHost }) {
+  const isYouHost = localUserId === hostId;
+
   return (
     <div className="card animate-slide-up" style={{ animationDelay: "0.1s" }}>
       <div className="section-label">People ({users.length})</div>
@@ -33,6 +35,15 @@ export default function UserList({ users, localUserId, hostId, readyUsers, conne
                     </span>
                   )}
                   {isUserHost && <span className="badge badge-host">HOST</span>}
+                  {isYouHost && !isUserHost && onTransferHost && (
+                    <button
+                      className="btn-transfer-host"
+                      onClick={() => onTransferHost(user.userId, user.displayName)}
+                      title={`Make ${user.displayName} the room host`}
+                    >
+                      👑 Make Host
+                    </button>
+                  )}
                 </div>
               </li>
             );
@@ -85,6 +96,23 @@ export default function UserList({ users, localUserId, hostId, readyUsers, conne
           border: 1px solid rgba(16, 185, 129, 0.3);
           font-size: 0.7rem;
           padding: 2px 6px;
+        }
+
+        .btn-transfer-host {
+          background: rgba(234, 179, 8, 0.12);
+          border: 1px solid rgba(234, 179, 8, 0.3);
+          color: #facc15;
+          font-size: 0.75rem;
+          padding: 3px 8px;
+          border-radius: var(--radius-sm);
+          cursor: pointer;
+          font-weight: 500;
+          transition: background 0.15s, border-color 0.15s;
+        }
+
+        .btn-transfer-host:hover {
+          background: rgba(234, 179, 8, 0.25);
+          border-color: rgba(234, 179, 8, 0.5);
         }
       `}</style>
     </div>

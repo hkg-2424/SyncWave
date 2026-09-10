@@ -27,7 +27,9 @@ export class RoomDO extends DurableObject {
     // In-memory room state (rebuilt from WebSocket attachments on wake)
     this.roomId = null;
     this.users = new Map(); // userId -> { userId, displayName, ws }
+    this.pendingUsers = new Map(); // userId -> { userId, displayName, ws } (waiting room)
     this.hostId = null;
+    this.isDestroying = false;
 
     // Track metadata (set when host uploads audio) — also persisted to storage
     this.track = null;
@@ -92,6 +94,18 @@ export class RoomDO extends DurableObject {
       switch (data.type) {
         case MESSAGE_TYPES.JOIN_ROOM:
           this.handleJoinRoom(ws, data);
+          break;
+
+        case MESSAGE_TYPES.APPROVE_JOIN:
+          this.handleApproveJoin(ws, data);
+          break;
+
+        case MESSAGE_TYPES.DENY_JOIN:
+          this.handleDenyJoin(ws, data);
+          break;
+
+        case MESSAGE_TYPES.TRANSFER_HOST:
+          this.handleTransferHost(ws, data);
           break;
 
         case MESSAGE_TYPES.CLOCK_SYNC_REQUEST:
@@ -168,37 +182,116 @@ export class RoomDO extends DurableObject {
       return;
     }
 
+    if (this.isDestroying) {
+      this.sendTo(ws, {
+        type: MESSAGE_TYPES.ERROR,
+        message: "Room is currently shutting down",
+      });
+      return;
+    }
+
     // Check room capacity (max 10 for MVP)
     if (this.users.size >= 10 && !this.users.has(userId)) {
       this.sendTo(ws, { type: MESSAGE_TYPES.ERROR, message: "Room is full (max 10 users)" });
       return;
     }
 
-    // If this userId is already connected (reconnection), clean up old WS
-    if (this.users.has(userId)) {
-      const existing = this.users.get(userId);
-      if (existing.ws !== ws) {
-        try { existing.ws.close(1000, "Replaced by new connection"); } catch {}
-      }
-    }
-
-    // Store user info in the WebSocket attachment so it survives hibernation
+    // Store attachment so user details survive hibernation
     ws.serializeAttachment({ userId, displayName });
 
-    // Register the user
-    this.users.set(userId, { userId, displayName, ws });
-
-    // Assign host if no host exists OR if the stored host is no longer connected.
-    // NOTE: We use the persisted this.hostId here (loaded from storage in constructor).
-    // We only reassign if the host slot is genuinely empty.
+    // 1. FRESH ROOM: First user joining becomes host and is admitted immediately
     if (!this.hostId) {
       this.hostId = userId;
-      // Persist the new host assignment
       this.ctx.storage.put("hostId", this.hostId);
+
+      this.users.set(userId, { userId, displayName, ws });
+
+      this.sendTo(ws, {
+        type: MESSAGE_TYPES.ROOM_STATE,
+        roomId: this.roomId,
+        hostId: this.hostId,
+        users: this.getUserList(),
+        track: this.track,
+        playback: this.getAuthoritativePlayback(),
+        readyUsers: Array.from(this.readyUsers),
+      });
+
+      return;
     }
 
-    // Send current room state to the joining user
+    // 2. EXISTING MEMBER RECONNECTING OR HOST JOINING
+    if (userId === this.hostId || this.users.has(userId)) {
+      // Clean up previous WS connection if replaced
+      if (this.users.has(userId)) {
+        const existing = this.users.get(userId);
+        if (existing.ws !== ws) {
+          try { existing.ws.close(1000, "Replaced by new connection"); } catch {}
+        }
+      }
+
+      this.users.set(userId, { userId, displayName, ws });
+
+      this.sendTo(ws, {
+        type: MESSAGE_TYPES.ROOM_STATE,
+        roomId: this.roomId,
+        hostId: this.hostId,
+        users: this.getUserList(),
+        track: this.track,
+        playback: this.getAuthoritativePlayback(),
+        readyUsers: Array.from(this.readyUsers),
+      });
+
+      this.broadcast({
+        type: MESSAGE_TYPES.USER_JOINED,
+        user: { userId, displayName },
+      }, userId);
+
+      return;
+    }
+
+    // 3. NEW GUEST ATTEMPTING TO JOIN AN EXISTING ROOM (WAITING ROOM CONTROL)
+    this.pendingUsers.set(userId, { userId, displayName, ws });
+
+    // Inform guest that they are waiting for host approval
     this.sendTo(ws, {
+      type: MESSAGE_TYPES.WAITING_FOR_APPROVAL,
+      roomId: this.roomId,
+    });
+
+    // Send join request notification to the host
+    const hostUser = this.users.get(this.hostId);
+    if (hostUser) {
+      this.sendTo(hostUser.ws, {
+        type: MESSAGE_TYPES.JOIN_REQUEST,
+        user: { userId, displayName },
+      });
+    }
+  }
+
+  handleApproveJoin(ws, data) {
+    const senderId = this.getUserId(ws);
+    if (senderId !== this.hostId) {
+      this.sendTo(ws, { type: MESSAGE_TYPES.ERROR, message: "Only the host can approve join requests" });
+      return;
+    }
+
+    const { targetUserId } = data;
+    if (!targetUserId || !this.pendingUsers.has(targetUserId)) return;
+
+    const pending = this.pendingUsers.get(targetUserId);
+    this.pendingUsers.delete(targetUserId);
+
+    if (this.users.size >= 10) {
+      this.sendTo(pending.ws, { type: MESSAGE_TYPES.JOIN_DENIED, message: "Room is full (max 10 users)" });
+      try { pending.ws.close(1000, "Room full"); } catch {}
+      return;
+    }
+
+    // Admit user
+    this.users.set(targetUserId, pending);
+
+    // Send complete ROOM_STATE to newly admitted user
+    this.sendTo(pending.ws, {
       type: MESSAGE_TYPES.ROOM_STATE,
       roomId: this.roomId,
       hostId: this.hostId,
@@ -208,54 +301,157 @@ export class RoomDO extends DurableObject {
       readyUsers: Array.from(this.readyUsers),
     });
 
-    // Notify all other users that someone joined
+    // Broadcast USER_JOINED to existing room members
     this.broadcast({
       type: MESSAGE_TYPES.USER_JOINED,
-      user: { userId, displayName },
-    }, userId);
+      user: { userId: pending.userId, displayName: pending.displayName },
+    }, pending.userId);
+  }
+
+  handleDenyJoin(ws, data) {
+    const senderId = this.getUserId(ws);
+    if (senderId !== this.hostId) {
+      this.sendTo(ws, { type: MESSAGE_TYPES.ERROR, message: "Only the host can deny join requests" });
+      return;
+    }
+
+    const { targetUserId } = data;
+    if (!targetUserId || !this.pendingUsers.has(targetUserId)) return;
+
+    const pending = this.pendingUsers.get(targetUserId);
+    this.pendingUsers.delete(targetUserId);
+
+    this.sendTo(pending.ws, {
+      type: MESSAGE_TYPES.JOIN_DENIED,
+      message: "Host denied your entry request.",
+    });
+
+    try {
+      pending.ws.close(1000, "Host denied entry");
+    } catch {}
+  }
+
+  handleTransferHost(ws, data) {
+    const senderId = this.getUserId(ws);
+    if (senderId !== this.hostId) {
+      this.sendTo(ws, { type: MESSAGE_TYPES.ERROR, message: "Only the host can transfer room ownership" });
+      return;
+    }
+
+    const { targetUserId } = data;
+    if (!targetUserId || !this.users.has(targetUserId)) {
+      this.sendTo(ws, { type: MESSAGE_TYPES.ERROR, message: "Target user is not in the room" });
+      return;
+    }
+
+    this.hostId = targetUserId;
+    this.ctx.storage.put("hostId", this.hostId);
+
+    this.broadcast({
+      type: MESSAGE_TYPES.HOST_CHANGED,
+      hostId: this.hostId,
+      previousHostId: senderId,
+    });
   }
 
   handleDisconnect(ws) {
     const disconnectedUserId = this.getUserId(ws);
     if (!disconnectedUserId) return;
 
-    this.users.delete(disconnectedUserId);
-    this.readyUsers.delete(disconnectedUserId);
+    // 1. Pending user in waiting room disconnected/cancelled
+    if (this.pendingUsers.has(disconnectedUserId)) {
+      this.pendingUsers.delete(disconnectedUserId);
+      const hostUser = this.users.get(this.hostId);
+      if (hostUser) {
+        this.sendTo(hostUser.ws, {
+          type: MESSAGE_TYPES.JOIN_REQUEST_CANCELLED,
+          userId: disconnectedUserId,
+        });
+      }
+      return;
+    }
 
-    // Notify remaining users
-    this.broadcast({
-      type: MESSAGE_TYPES.USER_LEFT,
-      userId: disconnectedUserId,
-    });
+    // 2. Admitted user disconnected
+    if (this.users.has(disconnectedUserId)) {
+      this.users.delete(disconnectedUserId);
+      this.readyUsers.delete(disconnectedUserId);
 
-    // Host reassignment: only if host disconnected AND there are remaining users.
-    // We check this.users (connected users) — not all known users.
-    if (this.hostId === disconnectedUserId && this.users.size > 0) {
-      const newHost = this.users.values().next().value;
-      this.hostId = newHost.userId;
-      // Persist the host change
-      this.ctx.storage.put("hostId", this.hostId);
+      // Notify remaining users
       this.broadcast({
-        type: MESSAGE_TYPES.HOST_CHANGED,
-        hostId: this.hostId,
+        type: MESSAGE_TYPES.USER_LEFT,
+        userId: disconnectedUserId,
       });
-    }
 
-    if (this.users.size === 0) {
-      // Room is now empty — reset everything including persisted state
-      this.hostId = null;
-      this.track = null;
-      this.readyUsers.clear();
-      this.playback = {
-        status: "paused",
-        position: 0,
-        startedAtServerTime: null,
-        revision: 0,
-      };
-      // Clear persisted state so the next room session starts fresh
-      this.ctx.storage.delete("hostId");
-      this.ctx.storage.delete("track");
+      // HOST DISCONNECTED: Check if host left WITHOUT transferring ownership
+      if (this.hostId === disconnectedUserId) {
+        if (this.users.size > 0) {
+          // Guests remain: trigger 10-second self-destruction warning!
+          this.isDestroying = true;
+          this.ctx.storage.delete("hostId");
+
+          this.broadcast({
+            type: MESSAGE_TYPES.HOST_LEFT,
+            destroyInMs: 10000,
+            message: "Host left without transferring ownership. The room will be destroyed in 10 seconds.",
+          });
+
+          // Reject any pending users
+          for (const [pId, pending] of this.pendingUsers) {
+            this.sendTo(pending.ws, {
+              type: MESSAGE_TYPES.HOST_LEFT,
+              destroyInMs: 10000,
+              message: "Host left without transferring ownership.",
+            });
+            try { pending.ws.close(1000, "Host left"); } catch {}
+          }
+          this.pendingUsers.clear();
+
+          // Schedule DO alarm in 10 seconds
+          this.ctx.storage.setAlarm(Date.now() + 10000);
+        } else {
+          // No guests remain: reset room immediately
+          this.resetRoomState();
+        }
+      } else if (this.isDestroying && this.users.size === 0) {
+        // Last guest left during destruction countdown
+        try { this.ctx.storage.deleteAlarm(); } catch {}
+        this.resetRoomState();
+      } else if (this.users.size === 0) {
+        this.resetRoomState();
+      }
     }
+  }
+
+  resetRoomState() {
+    this.hostId = null;
+    this.track = null;
+    this.readyUsers.clear();
+    this.pendingUsers.clear();
+    this.isDestroying = false;
+    this.playback = {
+      status: "paused",
+      position: 0,
+      startedAtServerTime: null,
+      revision: 0,
+    };
+    this.ctx.storage.deleteAll();
+  }
+
+  async alarm() {
+    // Alarm fired after 10s: Destroy room and close all WebSockets
+    for (const [uid, user] of this.users) {
+      try {
+        user.ws.close(4000, "Room destroyed: host left without transferring ownership");
+      } catch {}
+    }
+    for (const [uid, pending] of this.pendingUsers) {
+      try {
+        pending.ws.close(4000, "Room destroyed: host left without transferring ownership");
+      } catch {}
+    }
+    this.users.clear();
+    this.pendingUsers.clear();
+    this.resetRoomState();
   }
 
   // ─── WebRTC Signaling Relay (Milestone 3) ──────────────────────
