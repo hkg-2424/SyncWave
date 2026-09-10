@@ -187,12 +187,20 @@ export default function RoomPage() {
     },
   });
 
-  // Host DataChannel file transfer to open peers
+  const transferringPeersRef = useRef(new Set());
+
+  // Host DataChannel file transfer to open peers (guarded against concurrent duplicate transfers)
   useEffect(() => {
     if (!isHost || !uploadedFileRef.current || !track || !webrtcRef.current) return;
 
     for (const [peerId, peer] of webrtcRef.current.peers) {
-      if (peer.dcState === "open" && !readyUsers.includes(peerId)) {
+      if (
+        peer.dcState === "open" &&
+        !readyUsers.includes(peerId) &&
+        !transferringPeersRef.current.has(peerId)
+      ) {
+        transferringPeersRef.current.add(peerId);
+
         FileSender.sendFile(
           peer.dc,
           uploadedFileRef.current,
@@ -206,9 +214,13 @@ export default function RoomPage() {
               status: progress >= 100 ? "ready" : "transferring",
             });
           }
-        ).catch((err) => {
-          console.error(`[Host] Failed to transfer file to ${peerId}:`, err);
-        });
+        )
+          .catch((err) => {
+            console.error(`[Host] Failed to transfer file to ${peerId}:`, err);
+          })
+          .finally(() => {
+            transferringPeersRef.current.delete(peerId);
+          });
       }
     }
   }, [isHost, track, peerStates, readyUsers, webrtcRef]);
@@ -437,36 +449,17 @@ export default function RoomPage() {
         status: "ready",
       });
 
+      // Clear previous transfer locks so open peers receive the new track
+      transferringPeersRef.current.clear();
+
       sendMessage({
         type: MESSAGE_TYPES.TRACK_METADATA,
         track: trackMeta,
       });
 
-      const manager = webrtcRef.current;
-      if (manager) {
-        for (const [peerId, peer] of manager.peers) {
-          if (peer.dcState === "open") {
-            FileSender.sendFile(
-              peer.dc,
-              file,
-              trackMeta,
-              ({ progress, bytesSent, totalBytes }) => {
-                setTransferState({
-                  progress,
-                  bytesTransferred: bytesSent,
-                  totalBytes,
-                  fileName: file.name,
-                  status: progress >= 100 ? "ready" : "transferring",
-                });
-              }
-            ).catch((err) => {
-              console.error(`[Host] Failed to send file to ${peerId}:`, err);
-            });
-          }
-        }
-      }
+      // FileSender is automatically invoked by the guarded useEffect above for all open peers
     },
-    [sendMessage, webrtcRef]
+    [sendMessage]
   );
 
   // ── 12. Copy Invite Link & Rename ─────────────────────────────

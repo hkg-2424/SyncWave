@@ -1,7 +1,7 @@
 import { computeSHA256 } from "../utils/hashing.js";
 import { DATA_CHANNEL_MESSAGES } from "../protocol/messageTypes.js";
 
-export const CHUNK_SIZE = 64 * 1024; // 64 KB per Section 15
+export const CHUNK_SIZE = 16 * 1024; // 16 KB for maximum cross-browser RTCDataChannel reliability
 const HIGH_WATER_MARK = 1024 * 1024; // 1 MB buffer limit before pausing
 const LOW_WATER_THRESHOLD = 256 * 1024; // 256 KB threshold to resume sending
 
@@ -21,7 +21,11 @@ export class FileSender {
       throw new Error("DataChannel is not open for transfer");
     }
 
-    dataChannel.bufferedAmountLowThreshold = LOW_WATER_THRESHOLD;
+    try {
+      dataChannel.bufferedAmountLowThreshold = LOW_WATER_THRESHOLD;
+    } catch (e) {
+      // Fallback if browser doesn't support setting low threshold
+    }
 
     const transferId = crypto.randomUUID();
     const totalSize = file.size;
@@ -54,11 +58,18 @@ export class FileSender {
       // Check backpressure
       if (dataChannel.bufferedAmount > HIGH_WATER_MARK) {
         await new Promise((resolve) => {
+          let timer = null;
           const handler = () => {
-            dataChannel.removeEventListener("bufferedamountlow", handler);
+            try { dataChannel.removeEventListener("bufferedamountlow", handler); } catch {}
+            if (timer) clearTimeout(timer);
             resolve();
           };
-          dataChannel.addEventListener("bufferedamountlow", handler);
+          timer = setTimeout(handler, 100);
+          try {
+            dataChannel.addEventListener("bufferedamountlow", handler);
+          } catch {
+            resolve();
+          }
         });
       }
 
@@ -183,7 +194,7 @@ export class FileReceiver {
       return;
     }
 
-    const { chunks, mimeType, expectedSha256, fileName, duration, size } =
+    const { chunks, mimeType, expectedSha256, fileName, duration, size, bytesReceived } =
       this.currentTransfer;
 
     try {
@@ -195,8 +206,11 @@ export class FileReceiver {
       const actualSha256 = await computeSHA256(buffer);
 
       if (actualSha256 !== expectedSha256) {
+        console.error(
+          `[FileReceiver] SHA-256 verification failed! Expected ${expectedSha256}, got ${actualSha256}. Received ${bytesReceived}/${size} bytes across ${chunks.length} chunks.`
+        );
         const err = new Error(
-          `SHA-256 verification failed! Expected ${expectedSha256}, got ${actualSha256}`
+          `SHA-256 verification failed! Expected ${expectedSha256.slice(0, 8)}…, got ${actualSha256.slice(0, 8)}…`
         );
         this.onError(err);
         this.currentTransfer = null;
@@ -220,6 +234,7 @@ export class FileReceiver {
 
       this.currentTransfer = null;
     } catch (err) {
+      console.error("[FileReceiver] Exception in file completion:", err);
       this.onError(err);
       this.currentTransfer = null;
     }
