@@ -61,11 +61,27 @@ export class RoomDO extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // Extract roomId from the URL path: /api/room/:roomId/ws
+    // Extract roomId from the URL path: /api/room/:roomId/ws or /api/room/:roomId/exists
     const pathParts = url.pathname.split("/");
     const roomIdx = pathParts.indexOf("room");
     if (roomIdx !== -1 && pathParts[roomIdx + 1]) {
       this.roomId = pathParts[roomIdx + 1];
+    }
+
+    // Lightweight existence check — no WebSocket, no state mutation.
+    // The room is considered "active" if it has a persisted hostId.
+    if (url.pathname.endsWith("/exists") && request.method === "GET") {
+      const storedHostId = await this.ctx.storage.get("hostId");
+      const exists = Boolean(storedHostId);
+      return Response.json(
+        { exists, roomId: this.roomId },
+        {
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-store",
+          },
+        }
+      );
     }
 
     // WebSocket upgrade

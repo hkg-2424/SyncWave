@@ -11,6 +11,8 @@ export default function HomePage() {
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [joinId, setJoinId] = useState("");
+  const [joining, setJoining] = useState(false);
+  const [roomNotFound, setRoomNotFound] = useState(false); // { roomId }
   const [displayName, setDisplayName] = useState(() => getStoredName());
   const [nameTouched, setNameTouched] = useState(false);
 
@@ -27,6 +29,7 @@ export default function HomePage() {
     if (!nameValid) return;
     saveName();
     setCreating(true);
+    setRoomNotFound(false);
     try {
       const res = await fetch("/api/room/create", { method: "POST" });
       if (!res.ok) throw new Error("Failed to create room");
@@ -38,13 +41,28 @@ export default function HomePage() {
     }
   }
 
-  function handleJoinRoom(e) {
+  async function handleJoinRoom(e) {
     e.preventDefault();
     setNameTouched(true);
     if (!nameValid) return;
-    saveName();
     const id = joinId.trim().toUpperCase();
-    if (id) navigate(`/room/${id}`);
+    if (!id) return;
+    saveName();
+    setJoining(true);
+    setRoomNotFound(false);
+    try {
+      const res = await fetch(`/api/room/${id}/exists`);
+      const { exists } = await res.json();
+      if (exists) {
+        navigate(`/room/${id}`);
+      } else {
+        setRoomNotFound(true);
+        setJoining(false);
+      }
+    } catch {
+      // Network error — let them through anyway, server will handle it
+      navigate(`/room/${id}`);
+    }
   }
 
   return (
@@ -129,19 +147,49 @@ export default function HomePage() {
               type="text"
               placeholder="Enter Room ID"
               value={joinId}
-              onChange={(e) => setJoinId(e.target.value)}
-              className="home-join-input"
+              onChange={(e) => { setJoinId(e.target.value); setRoomNotFound(false); }}
+              className={`home-join-input${roomNotFound ? " join-input-error" : ""}`}
               maxLength={12}
             />
             <button
               id="join-room-btn"
               type="submit"
               className="btn btn-secondary"
-              disabled={!joinId.trim()}
+              disabled={!joinId.trim() || joining}
             >
-              Join
+              {joining ? <><span className="spinner spinner-dark" /> Checking…</> : "Join"}
             </button>
           </form>
+
+          {/* Room Not Found card */}
+          {roomNotFound && (
+            <div className="room-not-found animate-fade-in">
+              <div className="rnf-icon">🔍</div>
+              <div className="rnf-body">
+                <div className="rnf-title">
+                  Room <span className="rnf-id">{joinId.trim().toUpperCase()}</span> not found
+                </div>
+                <p className="rnf-desc">
+                  No active room exists with that ID. It may have expired or the ID could be wrong.
+                </p>
+                <div className="rnf-actions">
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleCreateRoom}
+                    disabled={creating}
+                  >
+                    {creating ? <><span className="spinner" /> Creating…</> : "✦ Create My Own Room"}
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => { setRoomNotFound(false); setJoinId(""); }}
+                  >
+                    Try Another ID
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -154,6 +202,69 @@ export default function HomePage() {
           position: relative;
           overflow: hidden;
           padding: 40px 20px;
+        }
+
+        /* Room Not Found */
+        .join-input-error {
+          border-color: var(--color-error) !important;
+          box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.15);
+        }
+
+        .room-not-found {
+          margin-top: 16px;
+          display: flex;
+          align-items: flex-start;
+          gap: 14px;
+          background: rgba(248, 113, 113, 0.06);
+          border: 1px solid rgba(248, 113, 113, 0.25);
+          border-radius: var(--radius-lg);
+          padding: 18px;
+          text-align: left;
+        }
+
+        .rnf-icon {
+          font-size: 1.6rem;
+          flex-shrink: 0;
+          margin-top: 2px;
+        }
+
+        .rnf-body {
+          flex: 1;
+        }
+
+        .rnf-title {
+          font-weight: 600;
+          font-size: 0.95rem;
+          color: var(--color-text);
+          margin-bottom: 4px;
+        }
+
+        .rnf-id {
+          font-family: var(--font-mono);
+          color: var(--color-error);
+        }
+
+        .rnf-desc {
+          font-size: 0.8rem;
+          color: var(--color-text-dim);
+          line-height: 1.5;
+          margin-bottom: 14px;
+        }
+
+        .rnf-actions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .rnf-actions .btn {
+          padding: 8px 18px;
+          font-size: 0.85rem;
+        }
+
+        .spinner-dark {
+          border-color: rgba(0,0,0,0.2);
+          border-top-color: #333;
         }
 
         .home-bg {

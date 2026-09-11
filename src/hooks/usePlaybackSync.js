@@ -99,9 +99,35 @@ export function usePlaybackSync({ clockSyncRef, sendMessage }) {
     const currentStatus = manager?.status ?? "paused";
 
     try {
+      // ── Step 1: Ensure the audio element is actually loaded ──────────
+      // Mobile browsers (iOS Safari, Android Chrome) silently ignore
+      // preload="auto" to save bandwidth. The audio has readyState=0
+      // (HAVE_NOTHING) even after the src is set. Calling play() on an
+      // unbuffered element fails — even from a direct user gesture.
+      // We must call load() and wait for canplay before proceeding.
+      if (audio.readyState < 3 /* HAVE_FUTURE_DATA */) {
+        // Kick off loading if not already in progress
+        if (audio.networkState === 0 /* NETWORK_EMPTY */ || audio.readyState === 0) {
+          audio.load();
+        }
+        // Wait up to 8s for the audio to be ready
+        await new Promise((resolve) => {
+          if (audio.readyState >= 3) { resolve(); return; }
+          const onReady = () => {
+            audio.removeEventListener("canplay", onReady);
+            audio.removeEventListener("error", onReady);
+            resolve();
+          };
+          audio.addEventListener("canplay", onReady, { once: true });
+          audio.addEventListener("error", onReady, { once: true });
+          setTimeout(resolve, 8000);
+        });
+      }
+
+      // ── Step 2: Branch on current playback status ─────────────────────
       if (currentStatus === "playing") {
-        // Host is actively playing — seek to the authoritative position so mobile
-        // doesn't resume from position 0, then start playback.
+        // Host is actively playing — seek to the authoritative position so
+        // mobile doesn't resume from position 0, then start playback.
         const syncedPosition = manager.getAuthoritativePosition();
         if (isFinite(syncedPosition) && syncedPosition >= 0) {
           audio.currentTime = syncedPosition;
@@ -113,9 +139,9 @@ export function usePlaybackSync({ clockSyncRef, sendMessage }) {
           manager._startDriftChecking();
         }
       } else {
-        // Host is paused — we must NOT play audio, but we still need to unlock
-        // the mobile audio context so future play() calls will succeed.
-        // The standard technique: play() then immediately pause().
+        // Host is paused — don't play audio, but unlock the mobile audio
+        // context so future play() calls will succeed without a gesture.
+        // Standard technique: play at volume=0 then immediately pause.
         audio.volume = 0;
         const playPromise = audio.play();
         if (playPromise !== undefined) {

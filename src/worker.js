@@ -39,6 +39,19 @@ export default {
       return Response.json({ roomId }, { status: 201 });
     }
 
+    // GET /api/room/:roomId/exists → check if a room has an active host
+    // Used by the client before navigating to avoid landing on an empty room.
+    const existsMatch = url.pathname.match(/^\/api\/room\/([A-Za-z0-9]+)\/exists$/);
+    if (existsMatch && request.method === "GET") {
+      const roomId = existsMatch[1].toUpperCase();
+      const doId = env.ROOMS.idFromName(roomId);
+      const roomStub = env.ROOMS.get(doId);
+      // Forward to the DO which handles /exists and reads its own storage.
+      const checkUrl = new URL(request.url);
+      checkUrl.pathname = `/api/room/${roomId}/exists`;
+      return roomStub.fetch(new Request(checkUrl.toString(), { method: "GET" }));
+    }
+
     // GET /api/room/:roomId/ws → WebSocket upgrade, forwarded to RoomDO
     const wsMatch = url.pathname.match(/^\/api\/room\/([A-Za-z0-9]+)\/ws$/);
     if (wsMatch) {
