@@ -1,12 +1,31 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+const NAME_KEY = "syncwave-displayName";
+
+function getStoredName() {
+  return sessionStorage.getItem(NAME_KEY) || "";
+}
+
 export default function HomePage() {
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
   const [joinId, setJoinId] = useState("");
+  const [displayName, setDisplayName] = useState(() => getStoredName());
+  const [nameTouched, setNameTouched] = useState(false);
+
+  const trimmedName = displayName.trim();
+  const nameValid = trimmedName.length > 0;
+  const nameError = nameTouched && !nameValid ? "Please enter a display name." : null;
+
+  function saveName() {
+    sessionStorage.setItem(NAME_KEY, trimmedName);
+  }
 
   async function handleCreateRoom() {
+    setNameTouched(true);
+    if (!nameValid) return;
+    saveName();
     setCreating(true);
     try {
       const res = await fetch("/api/room/create", { method: "POST" });
@@ -21,6 +40,9 @@ export default function HomePage() {
 
   function handleJoinRoom(e) {
     e.preventDefault();
+    setNameTouched(true);
+    if (!nameValid) return;
+    saveName();
     const id = joinId.trim().toUpperCase();
     if (id) navigate(`/room/${id}`);
   }
@@ -47,6 +69,35 @@ export default function HomePage() {
           with friends — no accounts, no uploads to servers. Your music travels
           directly between browsers.
         </p>
+
+        {/* ── Display Name Picker ─────────────────────────────── */}
+        <div className="name-picker">
+          <label className="name-label" htmlFor="display-name-input">
+            👤 Your display name
+          </label>
+          <input
+            id="display-name-input"
+            type="text"
+            className={`name-input${nameError ? " name-input-error" : ""}${nameValid ? " name-input-valid" : ""}`}
+            placeholder="e.g. Alex, DJ Shadow…"
+            value={displayName}
+            maxLength={24}
+            autoComplete="nickname"
+            onChange={(e) => {
+              setDisplayName(e.target.value);
+              setNameTouched(true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.target.blur();
+            }}
+          />
+          {nameError && <div className="name-error-msg">⚠ {nameError}</div>}
+          {nameValid && (
+            <div className="name-preview">
+              You'll appear as <strong>{trimmedName}</strong> in the room
+            </div>
+          )}
+        </div>
 
         {/* Actions */}
         <div className="home-actions">
@@ -147,6 +198,7 @@ export default function HomePage() {
           z-index: 1;
           text-align: center;
           max-width: 480px;
+          width: 100%;
         }
 
         .home-logo {
@@ -184,9 +236,80 @@ export default function HomePage() {
           font-size: 0.9rem;
           color: var(--color-text-dim);
           line-height: 1.7;
-          margin-bottom: 36px;
+          margin-bottom: 32px;
         }
 
+        /* ── Name Picker ─────────────────────────────────── */
+        .name-picker {
+          text-align: left;
+          margin-bottom: 28px;
+          background: rgba(255,255,255,0.03);
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-lg);
+          padding: 18px 20px 16px;
+          transition: border-color var(--transition-med);
+        }
+        .name-picker:focus-within {
+          border-color: var(--color-border-glow);
+          box-shadow: 0 0 0 1px var(--color-primary-glow);
+        }
+
+        .name-label {
+          display: block;
+          font-size: 0.75rem;
+          font-weight: 700;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--color-text-dim);
+          margin-bottom: 10px;
+        }
+
+        .name-input {
+          width: 100%;
+          padding: 11px 14px;
+          background: var(--color-bg-elevated);
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-md);
+          color: var(--color-text);
+          font-family: var(--font-sans);
+          font-size: 1rem;
+          font-weight: 500;
+          outline: none;
+          transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+        }
+        .name-input::placeholder {
+          color: var(--color-text-dim);
+          font-weight: 400;
+        }
+        .name-input:focus {
+          border-color: var(--color-primary);
+          box-shadow: 0 0 0 3px var(--color-primary-glow);
+        }
+        .name-input.name-input-valid {
+          border-color: rgba(52, 211, 153, 0.4);
+        }
+        .name-input.name-input-error {
+          border-color: var(--color-error);
+          box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.15);
+        }
+
+        .name-error-msg {
+          margin-top: 7px;
+          font-size: 0.78rem;
+          color: var(--color-error);
+        }
+
+        .name-preview {
+          margin-top: 8px;
+          font-size: 0.78rem;
+          color: var(--color-text-dim);
+        }
+        .name-preview strong {
+          color: var(--color-primary-hover);
+          font-weight: 600;
+        }
+
+        /* ── Actions ─────────────────────────────────────── */
         .home-actions {
           margin-bottom: 32px;
         }
@@ -195,6 +318,7 @@ export default function HomePage() {
           padding: 16px 40px;
           font-size: 1.05rem;
           border-radius: var(--radius-md);
+          width: 100%;
         }
 
         .spinner {
@@ -204,6 +328,7 @@ export default function HomePage() {
           border-top-color: #fff;
           border-radius: 50%;
           animation: spin 0.6s linear infinite;
+          flex-shrink: 0;
         }
 
         @keyframes spin {
@@ -272,7 +397,6 @@ export default function HomePage() {
           .btn-lg {
             padding: 14px 32px;
             font-size: 1rem;
-            width: 100%;
           }
           .home-join-form {
             flex-direction: column;

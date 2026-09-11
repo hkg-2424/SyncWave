@@ -95,21 +95,42 @@ export function usePlaybackSync({ clockSyncRef, sendMessage }) {
     const audio = audioRef.current;
     const manager = managerRef.current;
     if (!audio) return;
+
+    const currentStatus = manager?.status ?? "paused";
+
     try {
-      // Re-sync to the authoritative position before playing so mobile
-      // doesn't resume from position 0 after the user unlocks autoplay.
-      if (manager) {
+      if (currentStatus === "playing") {
+        // Host is actively playing — seek to the authoritative position so mobile
+        // doesn't resume from position 0, then start playback.
         const syncedPosition = manager.getAuthoritativePosition();
-        if (isFinite(syncedPosition) && syncedPosition > 0) {
+        if (isFinite(syncedPosition) && syncedPosition >= 0) {
           audio.currentTime = syncedPosition;
         }
-      }
-      await audio.play();
-      setAutoplayBlocked(false);
-      // Notify manager so it can resume drift checking
-      if (manager) {
-        manager.onAutoplayBlocked(false);
-        manager._startDriftChecking();
+        await audio.play();
+        setAutoplayBlocked(false);
+        if (manager) {
+          manager.onAutoplayBlocked(false);
+          manager._startDriftChecking();
+        }
+      } else {
+        // Host is paused — we must NOT play audio, but we still need to unlock
+        // the mobile audio context so future play() calls will succeed.
+        // The standard technique: play() then immediately pause().
+        audio.volume = 0;
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              audio.pause();
+              audio.volume = 1;
+            })
+            .catch(() => {
+              audio.volume = 1;
+            });
+        }
+        // Context is now unlocked — clear the banner.
+        setAutoplayBlocked(false);
+        if (manager) manager.onAutoplayBlocked(false);
       }
     } catch (err) {
       console.error("Failed to enable audio:", err);
