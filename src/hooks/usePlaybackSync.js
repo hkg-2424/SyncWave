@@ -93,13 +93,26 @@ export function usePlaybackSync({ clockSyncRef, sendMessage }) {
 
   const enableAudio = useCallback(async () => {
     const audio = audioRef.current;
-    if (audio) {
-      try {
-        await audio.play();
-        setAutoplayBlocked(false);
-      } catch (err) {
-        console.error("Failed to enable audio:", err);
+    const manager = managerRef.current;
+    if (!audio) return;
+    try {
+      // Re-sync to the authoritative position before playing so mobile
+      // doesn't resume from position 0 after the user unlocks autoplay.
+      if (manager) {
+        const syncedPosition = manager.getAuthoritativePosition();
+        if (isFinite(syncedPosition) && syncedPosition > 0) {
+          audio.currentTime = syncedPosition;
+        }
       }
+      await audio.play();
+      setAutoplayBlocked(false);
+      // Notify manager so it can resume drift checking
+      if (manager) {
+        manager.onAutoplayBlocked(false);
+        manager._startDriftChecking();
+      }
+    } catch (err) {
+      console.error("Failed to enable audio:", err);
     }
   }, []);
 

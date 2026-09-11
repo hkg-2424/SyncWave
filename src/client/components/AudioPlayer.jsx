@@ -40,6 +40,16 @@ export default function AudioPlayer({
     };
   }, [audioUrl]);
 
+  // iOS Safari and Android Chrome require an explicit audio.load() call when
+  // the src changes — they do NOT auto-load the new source, causing play() to
+  // silently fail until load() is called first.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (audio && audioUrl) {
+      audio.load();
+    }
+  }, [audioUrl, audioRef]);
+
   // Create a download URL for the guest (from the received blob)
   const downloadUrl = receivedBlob ? URL.createObjectURL(receivedBlob) : audioUrl;
   const canDownload = !isHost && isTrackReady && track;

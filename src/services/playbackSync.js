@@ -306,6 +306,8 @@ export class PlaybackSyncManager {
     if (!audio) return;
     try {
       await audio.play();
+      // Play succeeded — clear any autoplay-blocked state so the banner is dismissed.
+      this.onAutoplayBlocked(false);
     } catch (err) {
       if (err.name === "NotAllowedError") {
         console.warn("[Sync] Play rejected due to browser autoplay restriction.");

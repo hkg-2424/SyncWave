@@ -37,6 +37,8 @@ export default function FileUploader({ isHost, onFileReady, disabled }) {
         audio.onerror = () => resolve(0);
         // Fallback timeout
         setTimeout(() => resolve(0), 3000);
+        // iOS Safari requires an explicit load() call to trigger metadata loading.
+        audio.load();
       });
 
       // 3. Compute SHA-256
